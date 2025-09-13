@@ -78,13 +78,13 @@ struct Utils {
 #if !defined(USE_ROCM) && defined(CCCL_MAJOR_VERSION) && (CCCL_MAJOR_VERSION >= 13)
   #include <cuda/std/functional>
   #include <cuda/functional>
-  using Sum_fix = cuda::std::plus<>;
-  using Max_fix = cuda::maximum<>;
-  using Min_fix = cuda::minimum<>;
+  using Sum_CUDA_13_fix = cuda::std::plus<>;
+  using Max_CUDA_13_fix = cuda::maximum<>;
+  using Min_CUDA_13_fix = cuda::minimum<>;
 #else
   #include <cub/cub.cuh>
-  using Sum_fix = cub::Sum;
-  using Max_fix = cub::Max;
-  using Min_fix = cub::Min;
+  using Sum_CUDA_13_fix = cub::Sum;
+  using Max_CUDA_13_fix = cub::Max;
+  using Min_CUDA_13_fix = cub::Min;
 #endif
 
