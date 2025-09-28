@@ -42,7 +42,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargsItems)
@@ -55,8 +54,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.midashenglm import DashengConfig
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
-from .utils import (AutoWeightsLoader, init_vllm_registered_model,
-                    maybe_prefix, merge_multimodal_embeddings)
+from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
 _Tuple2 = Union[int, tuple[int, int], Sequence[int]]
 
@@ -497,8 +495,11 @@ class MiDashengLMDummyInputsBuilder(
 
         hf_processor = self.info.get_hf_processor()
         audio_token = hf_processor.audio_token
+        audio_bos_token = hf_processor.audio_bos_token
+        audio_eos_token = hf_processor.audio_eos_token
 
-        return audio_token * num_audios
+        single_audio_text = f"{audio_bos_token}{audio_token}{audio_eos_token}"
+        return single_audio_text * num_audios
 
     def get_dummy_mm_data(
         self,
@@ -577,14 +578,7 @@ class MiDashengLMMultiModalProcessor(
         vocab = tokenizer.get_vocab()
 
         audio_token = getattr(processor, "audio_token", "<|AUDIO|>")
-        audio_bos_token = getattr(processor, "audio_bos_token",
-                                  "<|audio_bos|>")
-        audio_eos_token = getattr(processor, "audio_eos_token",
-                                  "<|audio_eos|>")
-
         audio_token_id = vocab[audio_token]
-        audio_bos_id = vocab[audio_bos_token]
-        audio_eos_id = vocab[audio_eos_token]
 
         out_mm_data = out_mm_kwargs.get_data()
         audio_length = out_mm_data.get("audio_length")
@@ -604,7 +598,7 @@ class MiDashengLMMultiModalProcessor(
             audio_tokens = [audio_token_id] * num_features
 
             return PromptUpdateDetails.select_token_id(
-                [audio_bos_id] + audio_tokens + [audio_eos_id],
+                audio_tokens,
                 embed_token_id=audio_token_id,
             )
 
@@ -670,8 +664,18 @@ class MiDashengLMModel(nn.Module, SupportsMultiModal, SupportsPP):
                              f"Got type: {type(mm_input)}")
         if isinstance(mm_input, torch.Tensor):
             return mm_input.reshape(-1, *mm_input.shape[2:])
-        else:
-            return torch.concat(mm_input)
+
+        if name == "input_values":
+            max_length = max(tensor.shape[1] for tensor in mm_input)
+            padded_mm_input = [
+                torch.nn.functional.pad(tensor,
+                                        (0, max_length - tensor.shape[1]))
+                if tensor.shape[1] < max_length else tensor
+                for tensor in mm_input
+            ]
+            return torch.concat(padded_mm_input)
+
+        return torch.concat(mm_input)
 
     def _parse_and_validate_audio_input(
             self, **kwargs: object) -> Optional[MiDashengLMAudioInputs]:
@@ -739,21 +743,6 @@ class MiDashengLMModel(nn.Module, SupportsMultiModal, SupportsPP):
             return []
         return self._process_audio_input(audio_input)
 
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.decoder.get_input_embeddings(input_ids)
-        if multimodal_embeddings and len(multimodal_embeddings) > 0:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                multimodal_embeddings,
-                self.config.audio_token_id,
-            )
-        return inputs_embeds
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -766,8 +755,11 @@ class MiDashengLMModel(nn.Module, SupportsMultiModal, SupportsPP):
             inputs_embeds = None
         elif inputs_embeds is None:
             multimodal_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      multimodal_embeddings)
+            inputs_embeds = self.get_input_embeddings(
+                input_ids,
+                multimodal_embeddings,
+                is_multimodal=input_ids == self.config.audio_token_id,
+            )
             input_ids = None
 
         return self.decoder.model(input_ids,
@@ -778,9 +770,8 @@ class MiDashengLMModel(nn.Module, SupportsMultiModal, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.decoder.compute_logits(hidden_states, sampling_metadata)
+        return self.decoder.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
