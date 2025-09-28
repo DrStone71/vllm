@@ -10,8 +10,14 @@
 
 // compile-time estimate of max threads per SM for launch bounds.
 #ifndef VLLM_MAX_THREADS_PER_SM
-  #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 300
-    #define VLLM_MAX_THREADS_PER_SM 1536
+  #if defined(__CUDA_ARCH__)
+    #if __CUDA_ARCH__ >= 120 && __CUDA_ARCH__ < 130
+      #define VLLM_MAX_THREADS_PER_SM 1536
+    #elif __CUDA_ARCH__ >= 800
+      #define VLLM_MAX_THREADS_PER_SM 2048
+    #else
+      #define VLLM_MAX_THREADS_PER_SM 2048
+    #endif
   #else
     #define VLLM_MAX_THREADS_PER_SM 2048
   #endif
